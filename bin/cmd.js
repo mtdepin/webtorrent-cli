@@ -15,10 +15,12 @@ import MemoryChunkStore from 'memory-chunk-store'
 import prettierBytes from 'prettier-bytes'
 import stripIndent from 'common-tags/lib/stripIndent/index.js'
 import vlcCommand from 'vlc-command'
-import WebTorrent from 'webtorrent'
+import WebTorrent from '../../webtorrent/index.js'
 import Yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import open from 'open'
+import { codeBlock } from 'common-tags'
+import { start } from 'repl'
 
 const { version: webTorrentCliVersion } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)))
 const webTorrentVersion = WebTorrent.VERSION
@@ -64,7 +66,15 @@ const options = {
     'no-quit': { desc: 'Don\'t quit when player exits', type: 'boolean' },
     quit: { hidden: true, default: true },
     'on-done': { desc: 'Run script after torrent download is done', type: 'string', requiresArg: true },
-    'on-exit': { desc: 'Run script before program exit', type: 'string', requiresArg: true }
+    'on-exit': { desc: 'Run script before program exit', type: 'string', requiresArg: true },
+    'piece-length': { desc: 'Piece length', type: 'number', requiresArg: true },
+    'slice-length': { desc: 'Slice length', type: 'number', requiresArg: true },
+    'btslice-count': { desc: 'BT slice count', type: 'number', requiresArg: true },
+    'btslice-index': { desc: 'BT slice index', type: 'number', requiresArg: true },
+    'piece-select': { desc: 'Select specific pieces in torrent', defaultDescription: 'List pieces range' },
+    'btpart-count': { desc: 'BT pieces part count', type: 'number', requiresArg: true },
+    'btpart-index': { desc: 'BT pieces part index', type: 'number', requiresArg: true },
+    'torrent-id' : { desc: 'Torrent file', type: 'string', requiresArg: true }
   }
 }
 
@@ -72,7 +82,11 @@ const commands = [
   { command: ['download [torrent-ids...]', '$0'], desc: 'Download a torrent', handler: (args) => { processInputs(args.torrentIds, runDownload) } },
   { command: 'downloadmeta <torrent-ids...>', desc: 'Download metadata of torrent', handler: (args) => { processInputs(args.torrentIds, runDownloadMeta) } },
   { command: 'seed <inputs...>', desc: 'Seed a file or a folder', handler: (args) => { processInputs(args.inputs, runSeed) } },
+  { command: 'pieceseed <inputs...>', desc: 'Seed pieces from a file or a folder', handler: (args) => { processInputs(args.inputs, runPieceSeed) } },
   { command: 'create <input>', desc: 'Create a .torrent file', handler: (args) => { runCreate(args.input) } },
+  { command: 'slicecreate <input>', desc: 'Create slice .torrent file', handler: (args) => { runSliceCreate(args.input) } },
+  { command: 'slicedownload <input>', desc: 'Download slice from torrent', handler: (args) => { runSliceDownload(args.input) } },
+  { command: 'piecedownload <input>', desc: 'Download Pieces from torrent', handler: (args) => { runPieceDownload(args.input) } },
   { command: 'info <torrent-id>', desc: 'Show torrent information', handler: (args) => { runInfo(args.torrentId) } },
   { command: 'version', desc: 'Show version information', handler: () => yargs.showVersion('log') },
   { command: 'help', desc: 'Show help information' } // Implicitly calls showHelp, as a result middleware is not executed
@@ -160,6 +174,8 @@ yargs
 
 function init (_argv) {
   argv = _argv
+  console.log('TEST\n')
+  console.log(argv)
   if ((argv._.length === 0 && !argv.torrentIds) || argv._[0] === 'version') {
     return
   }
@@ -265,7 +281,9 @@ function runCreate (input) {
     argv.createdBy = 'WebTorrent <https://webtorrent.io>'
   }
 
+  console.log('runCreate', argv)
   createTorrent(input, argv, (err, torrent) => {
+    console.log('createTorrent', argv)
     if (err) {
       return errorAndExit(err)
     }
@@ -276,6 +294,313 @@ function runCreate (input) {
       process.stdout.write(torrent)
     }
   })
+}
+
+function runSliceCreate (input) {
+  if (!argv.createdBy) {
+    argv.createdBy = 'WebTorrent <https://webtorrent.io>'
+  }
+
+  console.log('runSliceCreate', argv)
+  let piecelen, slicenum, slicelen
+  piecelen = argv.pieceLength || 65536
+  slicenum = argv.sliceLength || 1024
+  slicelen = piecelen * slicenum
+  let readstream = fs.createReadStream(input)
+  let dir = input + '.dir'
+  let torrentdir = input + '.torrentdir'
+  fs.mkdirSync(dir)
+  fs.mkdirSync(torrentdir)
+  let index = 1001
+  let outputfname = dir + '/file' + index
+  let fsize = 0
+  readstream.on('data', (chunk) => {
+    console.log('outputfile', outputfname, fsize)
+    try {
+      fs.writeFileSync(outputfname, chunk, {flag: 'a+'})
+    } catch (err) {
+      console.log('writeFileSync error:', outputfname, err)
+    }
+    fsize += chunk.length
+    if (fsize >= slicelen) {
+      let btname = outputfname + ''
+      createTorrent(btname, argv, (err, torrent) => {
+        if (err) {
+          return errorAndExit(err)
+        }
+        let bt = torrentdir + btname.slice(btname.lastIndexOf('/file')) + '.torrent'
+        console.log('createTorrent', bt)
+        fs.writeFileSync(bt, torrent)
+      })
+      index += 1
+      outputfname = dir + '/file' + index
+      fsize = 0
+    }
+  })
+  readstream.on('end', () => {
+    console.log('readstrean end.')
+    if (fsize > 0) {
+      let btname = outputfname + ''
+      createTorrent(btname, argv, (err, torrent) => {
+        if (err) {
+          return errorAndExit(err)
+        }
+        let bt = torrentdir + btname.slice(btname.lastIndexOf('/file')) + '.torrent'
+        console.log('createTorrent', bt)
+        fs.writeFileSync(bt, torrent)
+      })
+    }
+    createTorrent(dir, argv, (err, torrent) => {
+      if (err) {
+        return errorAndExit(err)
+      }
+      fs.writeFileSync(dir + '.torrent', torrent)
+
+      client = new WebTorrent({
+        blocklist: argv.blocklist,
+        torrentPort: argv['torrent-port'],
+        dhtPort: argv['dht-port'],
+        downloadLimit: argv.downloadLimit,
+        uploadLimit: argv.uploadLimit
+      })
+    
+      client.on('error', fatalError)
+    
+      client.seed(dir, {
+        announce: argv.announce
+      }, torrent => {
+        console.log(torrent.magnetURI)
+      })
+    })
+  })
+  readstream.on('error', (err) => {
+    console.log('readstream error:', err)
+  })
+}
+
+function runSliceDownload (torrentId) {
+  let totalPart = argv.btsliceCount || 1
+  let dlPart = argv.btsliceIndex || 0
+  let partSlices
+  if (totalPart == 1 || dlPart == 0) {
+    runDownload(torrentId)
+    return
+  }
+
+  client = new WebTorrent({
+    blocklist: argv.blocklist,
+    torrentPort: argv['torrent-port'],
+    dhtPort: argv['dht-port'],
+    downloadLimit: argv.downloadLimit,
+    uploadLimit: argv.uploadLimit
+  })
+  client.on('error', fatalError)
+
+  const torrent = client.add(torrentId, {
+    path: argv.out,
+    announce: argv.announce
+  })
+
+  if (argv.verbose) {
+    torrent.on('warning', handleWarning)
+  }
+
+  torrent.on('infoHash', () => {
+    if ('select' in argv) {
+      torrent.so = argv.select.toString()
+    } else {
+      torrent.so = 'x'
+    }
+    console.log('on infoHash:', torrent.so, torrent.files.length)
+
+    if (argv.quiet) return
+
+    updateMetadata()
+    torrent.on('wire', updateMetadata)
+
+    function updateMetadata () {
+      console.log(`fetching torrent metadata from ${torrent.numPeers}`)
+    }
+
+    torrent.on('metadata', () => {
+      torrent.removeListener('wire', updateMetadata)
+      console.log('verifying existing torrent data...')
+    })
+  })
+
+  torrent.on('metadata', () => {
+    console.log('verifying existing torrent data...')
+    console.log('on metadata:', torrent.so, torrent.files.length)
+  })
+
+  torrent.on('done', () => {
+    torrentCount -= 1
+    if (!argv.quiet) {
+      const numActiveWires = torrent.wires.reduce((num, wire) => num + (wire.downloaded > 0), 0)
+      console.log(`torrent downloaded successfully from ${numActiveWires}/${torrent.numPeers} in ${getRuntime()}s`)
+    }
+    if (!playerName && !serving && argv.out && !argv['keep-seeding']) {
+      torrent.destroy()
+
+      if (torrentCount === 0) {
+        gracefulExit()
+      }
+    }
+  })
+
+  // Start http server
+  server = torrent.createServer()
+
+  server.listen(argv.port)
+    .on('error', err => {
+      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+        // If port is taken, pick one a free one automatically
+        server.close()
+        const serv = server.listen(0)
+        argv.port = server.address().port
+        return serv
+      } else return fatalError(err)
+    })
+
+  server.once('listening', initServer)
+  server.once('connection', () => (serving = true))
+
+  function initServer () {
+    if (torrent.ready) {
+      onReady()
+    } else {
+      torrent.once('ready', onReady)
+    }
+  }
+
+  async function onReady () {
+    partSlices = Math.ceil(torrent.files.length/totalPart)
+    torrent.so = ''
+    for (let i = 0; i < partSlices; i++) {
+      let index = (dlPart-1) * partSlices + i
+      torrent.files[index].select()
+      torrent.so += ' ' + index
+      console.log('on ready, select', torrent.files[index].name)
+    }
+  }
+}
+
+function runPieceDownload(torrentId) {
+  let x, y
+  if ('pieceSelect' in argv) {
+    console.log('runPieceDownload:', argv.pieceSelect)
+    let pieceRange = argv.pieceSelect.split(' ')
+    x = parseInt(pieceRange[0])
+    y = parseInt(pieceRange[1])
+    pieceDownload(torrentId, x, y)
+  } else {
+    x = argv.btpartCount || 1
+    y = argv.btpartIndex || 0
+    if (x === 1 || y === 0) {
+      runDownload(torrentId)
+      return
+    }
+    y = y - 1
+    getMeta(torrentId, (pieceLength) => {
+      let part = Math.ceil(pieceLength/x)
+      let start = y * part
+      let end = start + part -1
+      if (end > pieceLength - 1) {
+        end = pieceLength - 1
+      }
+      console.log('runPieceDownload:', part, start, end)
+      pieceDownload(torrentId, start, end)
+    })
+  }
+}
+
+function pieceDownload (torrentId, x, y) {
+  console.log('pieceDownload:', x, y)
+  let start = x
+  let end = y
+
+  client = new WebTorrent({
+    blocklist: argv.blocklist,
+    torrentPort: argv['torrent-port'],
+    dhtPort: argv['dht-port'],
+    downloadLimit: argv.downloadLimit,
+    uploadLimit: argv.uploadLimit
+  })
+  client.on('error', fatalError)
+
+  const torrent = client.add(torrentId, {
+    path: argv.out,
+    announce: argv.announce,
+    pieceDownload: true,
+    pieceStart: start,
+    pieceEnd: end
+  })
+
+  if (argv.verbose) {
+    torrent.on('warning', handleWarning)
+  }
+
+  torrent.on('infoHash', () => {
+    torrent.so = 'x'
+    console.log('on infoHash:', torrent.so, torrent.files.length)
+  })
+
+  torrent.on('metadata', () => {
+    console.log('on metadata:', torrent.so, torrent.files.length, torrent.pieces.length)
+    if (x > y) {
+      let part = Math.ceil(torrent.pieces.length/x)
+      start = y * part
+      end = start + part -1
+      if (end > torrent.pieces.length - 1) {
+        end = torrent.pieces.length - 1
+      }
+      console.log('on metadata:', part, start, end)
+    }
+  })
+
+  torrent.on('done', () => {
+    torrentCount -= 1
+    const numActiveWires = torrent.wires.reduce((num, wire) => num + (wire.downloaded > 0), 0)
+    console.log(`torrent downloaded successfully from ${numActiveWires}/${torrent.numPeers} in ${getRuntime()}s`)
+    if (!playerName && !serving && argv.out && !argv['keep-seeding']) {
+      torrent.destroy()
+
+      if (torrentCount === 0) {
+        gracefulExit()
+      }
+    }
+  })
+
+  // Start http server
+  server = torrent.createServer()
+
+  server.listen(argv.port)
+    .on('error', err => {
+      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+        // If port is taken, pick one a free one automatically
+        server.close()
+        const serv = server.listen(0)
+        argv.port = server.address().port
+        return serv
+      } else return fatalError(err)
+    })
+
+  server.once('listening', initServer)
+  server.once('connection', () => (serving = true))
+
+  function initServer () {
+    if (torrent.ready) {
+      onReady()
+    } else {
+      torrent.once('ready', onReady)
+    }
+  }
+
+  async function onReady () {
+    console.log('on ready, select %s-%s', start, end)
+    torrent.so = ''
+    torrent.select(start, end, false)
+  }
 }
 
 async function runDownload (torrentId) {
@@ -610,6 +935,31 @@ function runDownloadMeta (torrentId) {
   })
 }
 
+function getMeta (torrentId, cb) {
+  if (!argv.out && !argv.stdout) {
+    argv.out = process.cwd()
+  }
+
+  client = new WebTorrent({
+    blocklist: argv.blocklist,
+    torrentPort: argv['torrent-port'],
+    dhtPort: argv['dht-port'],
+    downloadLimit: argv.downloadLimit,
+    uploadLimit: argv.uploadLimit
+  })
+  client.on('error', fatalError)
+
+  client.add(torrentId, {
+    store: MemoryChunkStore,
+    announce: argv.announce
+  }, torrent => {
+    let count = torrent.pieces.length
+    //let length = torrent.pieceLength
+    torrent.destroy()
+    cb(count)
+  })
+}
+
 function runSeed (input) {
   if (path.extname(input).toLowerCase() === '.torrent' || /^magnet:/.test(input)) {
     // `webtorrent seed` is meant for creating a new torrent based on a file or folder
@@ -637,6 +987,54 @@ function runSeed (input) {
     }
 
     drawTorrent(torrent)
+  })
+}
+
+function runPieceSeed (input) {
+  let torrentId = argv.torrentId
+  let x = argv.btpartCount || 1
+  let y = argv.btpartIndex-1 || 0
+  console.log('runPieceSeed:', input, torrentId, x, y)
+
+  getMeta(torrentId, (pieceLength) => {
+    let part = Math.ceil(pieceLength/x)
+    let start = y * part
+    let end = start + part -1
+    if (end > pieceLength - 1) {
+      end = pieceLength - 1
+    }
+    console.log('runPieceSeed:', part, start, end)
+    
+    client = new WebTorrent({
+      blocklist: argv.blocklist,
+      torrentPort: argv['torrent-port'],
+      dhtPort: argv['dht-port'],
+      downloadLimit: argv.downloadLimit,
+      uploadLimit: argv.uploadLimit
+    })
+  
+    client.on('error', fatalError)
+  
+    client.pieceSeed(input, fs.readFileSync(torrentId), {
+      announce: argv.announce,
+      pieceSeed: true,
+      pieceStart: start,
+      pieceEnd: end,
+      pieceSeedPath: path.basename(input)
+    }, torrent => {
+      console.log('runPieceSeed: ontorrent')
+      torrent.on('infoHash', () => {
+        torrent.so = 'x'
+        console.log('on infoHash:', torrent.so, torrent.files.length)
+      })
+  
+      torrent.on('metadata', () => {
+        console.log('on metadata:', torrent.so, torrent.files.length, torrent.pieces.length)
+        console.log(torrent.magnetURI)
+      })
+    }, torrent => {
+      console.log('runPieceSeed: onseed')
+    })
   })
 }
 
