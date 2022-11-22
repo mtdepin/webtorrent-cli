@@ -46,7 +46,8 @@
     "node": ">=12.20.0"
   },
   "exports": {
-    "./bin/cmd.js": "./bin/cmd.js"
+    "./bin/cmd.js": "./bin/cmd.js",
+    "./index.js": "./index.js"
   },
   "homepage": "https://webtorrent.io",
   "keywords": [

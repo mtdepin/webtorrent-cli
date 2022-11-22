@@ -16,11 +16,11 @@ import prettierBytes from 'prettier-bytes'
 import stripIndent from 'common-tags/lib/stripIndent/index.js'
 import vlcCommand from 'vlc-command'
 import WebTorrent from '../../webtorrent/index.js'
+import { WebTorrentCli } from '../index.js'
 import Yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import open from 'open'
-import { codeBlock } from 'common-tags'
-import { start } from 'repl'
+import net from 'node:net'
 
 const { version: webTorrentCliVersion } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)))
 const webTorrentVersion = WebTorrent.VERSION
@@ -88,6 +88,7 @@ const commands = [
   { command: 'slicedownload <input>', desc: 'Download slice from torrent', handler: (args) => { runSliceDownload(args.input) } },
   { command: 'piecedownload <input>', desc: 'Download Pieces from torrent', handler: (args) => { runPieceDownload(args.input) } },
   { command: 'info <torrent-id>', desc: 'Show torrent information', handler: (args) => { runInfo(args.torrentId) } },
+  { command: 'daemon', desc: 'Run daemon', handler: () => { runDaemon() } },
   { command: 'version', desc: 'Show version information', handler: () => yargs.showVersion('log') },
   { command: 'help', desc: 'Show help information' } // Implicitly calls showHelp, as a result middleware is not executed
 ]
@@ -486,121 +487,25 @@ function runSliceDownload (torrentId) {
 }
 
 function runPieceDownload(torrentId) {
-  let x, y
-  if ('pieceSelect' in argv) {
-    console.log('runPieceDownload:', argv.pieceSelect)
-    let pieceRange = argv.pieceSelect.split(' ')
-    x = parseInt(pieceRange[0])
-    y = parseInt(pieceRange[1])
-    pieceDownload(torrentId, x, y)
-  } else {
-    x = argv.btpartCount || 1
-    y = argv.btpartIndex || 0
-    if (x === 1 || y === 0) {
-      runDownload(torrentId)
-      return
-    }
-    y = y - 1
-    getMeta(torrentId, (pieceLength) => {
-      let part = Math.ceil(pieceLength/x)
-      let start = y * part
-      let end = start + part -1
-      if (end > pieceLength - 1) {
-        end = pieceLength - 1
-      }
-      console.log('runPieceDownload:', part, start, end)
-      pieceDownload(torrentId, start, end)
-    })
-  }
-}
-
-function pieceDownload (torrentId, x, y) {
-  console.log('pieceDownload:', x, y)
-  let start = x
-  let end = y
-
-  client = new WebTorrent({
-    blocklist: argv.blocklist,
-    torrentPort: argv['torrent-port'],
-    dhtPort: argv['dht-port'],
-    downloadLimit: argv.downloadLimit,
-    uploadLimit: argv.uploadLimit
-  })
-  client.on('error', fatalError)
-
-  const torrent = client.add(torrentId, {
-    path: argv.out,
+  let pieceDownload = argv.btpartCount ? true : false
+  let wcl = new WebTorrentCli(argv)
+  wcl.add(torrentId, {
+    pieceDownload: pieceDownload,
+    out: argv.out,
     announce: argv.announce,
-    pieceDownload: true,
-    pieceStart: start,
-    pieceEnd: end
-  })
-
-  if (argv.verbose) {
-    torrent.on('warning', handleWarning)
-  }
-
-  torrent.on('infoHash', () => {
-    torrent.so = 'x'
-    console.log('on infoHash:', torrent.so, torrent.files.length)
-  })
-
-  torrent.on('metadata', () => {
-    console.log('on metadata:', torrent.so, torrent.files.length, torrent.pieces.length)
-    if (x > y) {
-      let part = Math.ceil(torrent.pieces.length/x)
-      start = y * part
-      end = start + part -1
-      if (end > torrent.pieces.length - 1) {
-        end = torrent.pieces.length - 1
-      }
-      console.log('on metadata:', part, start, end)
-    }
-  })
-
-  torrent.on('done', () => {
-    torrentCount -= 1
-    const numActiveWires = torrent.wires.reduce((num, wire) => num + (wire.downloaded > 0), 0)
-    console.log(`torrent downloaded successfully from ${numActiveWires}/${torrent.numPeers} in ${getRuntime()}s`)
-    if (!playerName && !serving && argv.out && !argv['keep-seeding']) {
-      torrent.destroy()
-
-      if (torrentCount === 0) {
-        gracefulExit()
-      }
-    }
-  })
-
-  // Start http server
-  server = torrent.createServer()
-
-  server.listen(argv.port)
-    .on('error', err => {
-      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
-        // If port is taken, pick one a free one automatically
-        server.close()
-        const serv = server.listen(0)
-        argv.port = server.address().port
-        return serv
-      } else return fatalError(err)
+    btpartCount: argv.btpartCount,
+    btpartIndex: argv.btpartIndex,
+    keepSeeding: argv['keep-seeding'] || false
+  }, torrent => {
+    console.log('on torrent')
+    torrent.on('done', () => {
+      console.log('Download done.')
+      gracefulExit()
+      wcl.destroy(() => {
+        setTimeout(() => process.exit(0), 1000).unref()
+      })
     })
-
-  server.once('listening', initServer)
-  server.once('connection', () => (serving = true))
-
-  function initServer () {
-    if (torrent.ready) {
-      onReady()
-    } else {
-      torrent.once('ready', onReady)
-    }
-  }
-
-  async function onReady () {
-    console.log('on ready, select %s-%s', start, end)
-    torrent.so = ''
-    torrent.select(start, end, false)
-  }
+  })
 }
 
 async function runDownload (torrentId) {
@@ -905,7 +810,8 @@ function runDownloadMeta (torrentId) {
 
   const torrent = client.add(torrentId, {
     store: MemoryChunkStore,
-    announce: argv.announce
+    announce: argv.announce,
+    mdonly: true
   })
 
   torrent.on('infoHash', function () {
@@ -932,31 +838,6 @@ function runDownloadMeta (torrentId) {
       fs.writeFileSync(torrentFilePath, this.torrentFile)
       gracefulExit()
     })
-  })
-}
-
-function getMeta (torrentId, cb) {
-  if (!argv.out && !argv.stdout) {
-    argv.out = process.cwd()
-  }
-
-  client = new WebTorrent({
-    blocklist: argv.blocklist,
-    torrentPort: argv['torrent-port'],
-    dhtPort: argv['dht-port'],
-    downloadLimit: argv.downloadLimit,
-    uploadLimit: argv.uploadLimit
-  })
-  client.on('error', fatalError)
-
-  client.add(torrentId, {
-    store: MemoryChunkStore,
-    announce: argv.announce
-  }, torrent => {
-    let count = torrent.pieces.length
-    //let length = torrent.pieceLength
-    torrent.destroy()
-    cb(count)
   })
 }
 
@@ -991,50 +872,79 @@ function runSeed (input) {
 }
 
 function runPieceSeed (input) {
-  let torrentId = argv.torrentId
-  let x = argv.btpartCount || 1
-  let y = argv.btpartIndex-1 || 0
-  console.log('runPieceSeed:', input, torrentId, x, y)
+  let pieceSeed = argv.btpartCount ? true : false
+  let wcl = new WebTorrentCli(argv)
+  wcl.seed(input, {
+    announce: argv.announce,
+    pieceSeed: pieceSeed,
+    btpartCount: argv.btpartCount,
+    btpartIndex: argv.btpartIndex,
+    torrentId: argv.torrentId
+  }, torrent => {
+    console.log(torrent.magnetURI)
+  })
+}
 
-  getMeta(torrentId, (pieceLength) => {
-    let part = Math.ceil(pieceLength/x)
-    let start = y * part
-    let end = start + part -1
-    if (end > pieceLength - 1) {
-      end = pieceLength - 1
-    }
-    console.log('runPieceSeed:', part, start, end)
-    
-    client = new WebTorrent({
-      blocklist: argv.blocklist,
-      torrentPort: argv['torrent-port'],
-      dhtPort: argv['dht-port'],
-      downloadLimit: argv.downloadLimit,
-      uploadLimit: argv.uploadLimit
-    })
-  
-    client.on('error', fatalError)
-  
-    client.pieceSeed(input, fs.readFileSync(torrentId), {
-      announce: argv.announce,
-      pieceSeed: true,
-      pieceStart: start,
-      pieceEnd: end,
-      pieceSeedPath: path.basename(input)
-    }, torrent => {
-      console.log('runPieceSeed: ontorrent')
-      torrent.on('infoHash', () => {
-        torrent.so = 'x'
-        console.log('on infoHash:', torrent.so, torrent.files.length)
+function runDaemon () {
+  let wcl = new WebTorrentCli()
+  let index
+  const onCommand = (command, input, opts) => {
+    if (command === 'add') {
+      index = wcl.add(input, {
+        pieceDownload: opts.pieceDownload || false,
+        out: opts.out,
+        announce: opts.announce,
+        btpartCount: opts.btpartCount,
+        btpartIndex: opts.btpartIndex,
+        keepSeeding: opts.keepSeeding || false
+      }, torrent => {
+        console.log('on torrent:', input)
       })
-  
-      torrent.on('metadata', () => {
-        console.log('on metadata:', torrent.so, torrent.files.length, torrent.pieces.length)
+      console.log('add:', index)
+    } else if (command === 'seed') {
+      index = wcl.seed(input, {
+        announce: opts.announce,
+        pieceSeed: opts.pieceSeed || false,
+        btpartCount: opts.btpartCount,
+        btpartIndex: opts.btpartIndex,
+        torrentId: opts.torrentId
+      }, torrent => {
         console.log(torrent.magnetURI)
       })
-    }, torrent => {
-      console.log('runPieceSeed: onseed')
+      console.log('seed:', index)
+    }
+  }
+
+  const server = net.createServer(c => {
+    console.log('client connected:', c.address())
+    c.on('end', () => {
+      console.log('client disconnected');
     })
+    c.on('data', data => {
+      console.log('recved:', data.toString())
+      c.write(data)
+      const requstParser = Yargs()
+      let opts = requstParser.parse(data.toString())
+      console.log(opts)
+      console.log('argv:', opts._, opts._.length, opts._[0])
+      if (opts._.length > 1) {
+        onCommand(opts._[0], opts._[1], opts)
+      } else if (opts._.length > 0) {
+        onCommand(opts._[0], null, opts)
+      }
+    })
+  })
+  server.on('error', err => {
+    fatalError(err)
+  })
+  const sock = '/var/run/webtorrent.sock'
+  try {
+    fs.unlinkSync(sock)
+  } catch (error) {
+    console.log('unlink error:', error.name, error.message)
+  }
+  server.listen(sock, () => {
+    console.log('server bound.')
   })
 }
 
