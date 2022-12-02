@@ -719,7 +719,8 @@ function runDaemon () {
         announce: opts.announce,
         btpartCount: opts.btpartCount,
         btpartIndex: opts.btpartIndex,
-        keepSeeding: opts.keepSeeding || false
+        keepSeeding: opts.keepSeeding || false,
+        saveTorrent: opts.saveTorrent || false
       }, torrent => {
         console.log('on torrent:', input)
       })
@@ -735,6 +736,23 @@ function runDaemon () {
         console.log(torrent.magnetURI)
       })
       console.log('seed:', index)
+    } else if (command === 'list') {
+      let list = wcl.torrents
+      console.log('list:', list)
+    } else if (command === 'progress') {
+      let p = wcl.progress
+      console.log('progress:', p)
+    } else if (command === 'remove') {
+      wcl.remove(input, err => {
+        if (err) console.log('remove error', input, err)
+      })
+    } else if (command === 'destroy') {
+      wcl.destroy(err => {
+        if (err) console.log('destroy error', err)
+      })
+    } else if (command === 'quit') {
+      console.log('quit..')
+      setTimeout(() => process.exit(0), 1000).unref()
     }
   }
 

@@ -36,15 +36,41 @@ export class WebTorrentCli extends EventEmitter {
     this._counter = 0
     this._resumeDir = opts.resumePath
     this._resumeFile = null
+    this._storing = false
+    this._loading = false
+    this._loadCount = 0
+    this._storePending = false
     this._client.on('error', err => {
       this.emit('error', err)
     })
-    //this.load()
+    this.on('store', () => {
+      debug('got store')
+      this.store()
+    })
+    this.load()
     debug('new WebTorrentCli')
   }
 
   get progress () {
     return this._client.progress
+  }
+
+  get torrents () {
+    let data = []
+    for (let entry of this._torrents) {
+      let torrentId = entry[1]
+      let progress = 0
+      if (torrentId.seeding) progress = 1
+      else if (!torrentId.done && torrentId._torrent) progress = torrentId._torrent.progress
+      data.push({
+        index: torrentId._id,
+        infohash: torrentId.info,
+        done: torrentId.done,
+        seeding: torrentId.seeding,
+        progress: progress,
+      })
+    }
+    return data
   }
 
   newTorrent (torrent, opts = {}) {
@@ -84,6 +110,13 @@ export class WebTorrentCli extends EventEmitter {
       }, torrent => {
         tid.meta = torrent.torrentFile
         this.store()
+        if (opts.saveTorrent) {
+          const torrentFilePath = `${torrent.path}/${torrent.infoHash}.torrent`
+          fs.writeFile(torrentFilePath, torrent.torrentFile, (err) => {
+            if (err) console.log('write torrent file error', torrentFilePath, err)
+          })
+          console.log('save torrent', torrentFilePath)
+        }
         if (typeof ontorrent === 'function') ontorrent(torrent)
       })
       const index = this.newTorrent(torrent, opts)
@@ -105,6 +138,11 @@ export class WebTorrentCli extends EventEmitter {
           tid.seedFiles = convertFiles(torrent.files)
           console.log('seeding:', torrentId.seedPath, torrentId.seedFiles)
         }
+        this.store()
+      })
+      torrent.on('close', () => {
+        if (this._torrents.has(index)) this._torrents.delete(index)
+        console.log('close:', index)
         this.store()
       })
       return index
@@ -132,8 +170,16 @@ export class WebTorrentCli extends EventEmitter {
         pieceStart: start,
         pieceEnd: end
       }, torrent => {
+        tid.info = torrent.infoHash
         tid.meta = torrent.torrentFile
         this.store()
+        if (opts.saveTorrent) {
+          const torrentFilePath = `${torrent.path}/${torrent.infoHash}.torrent`
+          fs.writeFile(torrentFilePath, torrent.torrentFile, (err) => {
+            if (err) console.log('write torrent file error', torrentFilePath, err)
+          })
+          console.log('save torrent', torrentFilePath)
+        }
         if (typeof ontorrent === 'function') ontorrent(torrent)
       })
       tid._torrent = torrent
@@ -153,13 +199,15 @@ export class WebTorrentCli extends EventEmitter {
         }
         this.store()
       })
-      torrent.on('infoHash', () => {
-        tid.info = torrent.infoHash
-      })
       torrent.on('ready', () => {
         debug('on ready, select %s-%s', start, end)
         torrent.so = ''
         torrent.select(start, end, false)
+      })
+      torrent.on('close', () => {
+        if (this._torrents.has(index)) this._torrents.delete(index)
+        console.log('close:', index)
+        this.store()
       })
     })
     tid._torrent = meta
@@ -168,6 +216,7 @@ export class WebTorrentCli extends EventEmitter {
 
   seed (input, opts, onseed) {
     debug('seed %s', opts)
+    console.log('seed:', input.length, input)
     if (!opts.pieceSeed) {
       let torrentId
       const torrent = this._client.seed(input, {announce: opts.announce}, torrent => {
@@ -180,11 +229,14 @@ export class WebTorrentCli extends EventEmitter {
       })
       const index = this.newTorrent(torrent, opts)
       torrentId = this.getTorrentId(index)
-      torrent.on('infohash', () => {
-        torrentId.info = torrent.infoHash
-      })
       torrent.on('metadata', () => {
+        torrentId.info = torrent.infoHash
         torrentId.meta = torrent.torrentFile
+      })
+      torrent.on('close', () => {
+        if (this._torrents.has(index)) this._torrents.delete(index)
+        console.log('close:', index)
+        this.store()
       })
       return index
     }
@@ -215,12 +267,17 @@ export class WebTorrentCli extends EventEmitter {
         torrent.on('infoHash', () => {
           torrent.so = 'x'
           console.log('on infoHash:', torrent.so, torrent.files.length)
-          torrentId.info = torrent.infoHash
         })
     
         torrent.on('metadata', () => {
           console.log('on metadata:', torrent.so, torrent.files.length, torrent.pieces.length)
+          torrentId.info = torrent.infoHash
           torrentId.meta = torrent.torrentFile
+        })
+        torrent.on('close', () => {
+          if (this._torrents.has(index)) this._torrents.delete(index)
+          console.log('close:', index)
+          this.store()
         })
       }, torrent => {
         console.log('runPieceSeed: onseed')
@@ -289,12 +346,59 @@ export class WebTorrentCli extends EventEmitter {
     return torrent
   }
 
+  resumeData () {
+    let data = []
+    for (let entry of this._torrents) {
+      let torrentId = entry[1]
+      if (torrentId.done && !torrentId.seeding) continue
+      data.push({
+        index: torrentId._id,
+        info: torrentId.info,
+        meta: JSON.stringify(torrentId.meta),
+        seeding: torrentId.seeding,
+        seedpath: torrentId.seedPath,
+        seedfiles: torrentId.seedFiles,
+        opts: torrentId._opts,
+      })
+    }
+    return data
+  }
+
+  parseResumeData (raw) {
+    let data = []
+    let a = JSON.parse(raw)
+    a.map(t => {
+      data.push({
+        index: t.index,
+        info: t.info,
+        meta: Buffer.from(JSON.parse(t.meta).data),
+        seeding: t.seeding,
+        seedpath: t.seedpath,
+        seedfiles: t.seedfiles,
+        opts: t.opts,
+      })
+    })
+    return data
+  }
+
   store () {
     if (!this._resumeDir) return
+    if (this._loading) return
+    if (this._storing) {
+      this._storePending = true
+      return
+    }
+    this._storing = true
     const resumeFile = this._resumeDir + '/' + 'webtorrent-resume-' + Date.now()
     const oldFile = this._resumeFile
-    const data = JSON.stringify(this._torrents)
+    const data = JSON.stringify(this.resumeData())
+    console.log('store: torrents', this._torrents)
     fs.writeFile(resumeFile, data, err => {
+      this._storing = false
+      if (this._storePending) {
+        this._storePending = false
+        this.emit('store')
+      }
       if (err) {
         console.log('writeFile error:', resumeFile, err)
         return
@@ -314,6 +418,7 @@ export class WebTorrentCli extends EventEmitter {
   load () {
     console.log('load:', this._resumeDir)
     if (!this._resumeDir) return
+    this._loading = true
     let st = fs.statSync(this._resumeDir, {throwIfNoEntry: false})
     if (!st) {
       fs.mkdir(this._resumeDir, { recursive: true }, err => {
@@ -321,10 +426,12 @@ export class WebTorrentCli extends EventEmitter {
           console.log('mkdir error:', this._resumeDir, err.name, err.message)
         }
       })
+      this._loading = false
       return
     }
     if (!st.isDirectory()) {
       console.log('path %s is not a directory', this._resumeDir)
+      this._loading = false
       return
     }
     const names = fs.readdirSync(this._resumeDir)
@@ -345,29 +452,37 @@ export class WebTorrentCli extends EventEmitter {
       path = this._resumeDir + '/' + resumeFile
       const data = fs.readFileSync(path)
       try {
-        const obj = JSON.parse(data)
-        if (obj instanceof Map) {
-          for (let entry of obj) {
-            if (entry[1] instanceof WebTorrentId) {
-              this.resume(obj)
-            }
-          }
-        }
+        const torrents = this.parseResumeData(data)
+        this._loadCount = torrents.length
+        torrents.map(t => {
+          this.resume(t, () => {
+            --this._loadCount
+            if (this._loadCount === 0) this._loading = false
+          })
+        })
+        this._resumeFile = path
+        console.log('Resume torrents from file:', path)
       } catch (e) {
         console.log('Parse resume file error:', e.name, e.message)
+        this._loading = false
       }
     }
   }
 
-  resume (torrentId) {
-    console.log('resume:', torrentId._id, torrentId.info)
+  resume (torrentId, cb) {
+    console.log('resume:', torrentId.index, torrentId.info)
     if (torrentId.seeding) {
-      if (torrentId.seedPath) {
-        if (torrentId.seedFiles) this.seed(torrentId.seedFiles, torrentId.opts)
-        else this.seed(torrentId.seedPath, torrentId.opts)
+      if (torrentId.seedpath) {
+        if (torrentId.seedfiles) {
+          let input = []
+          torrentId.seedfiles.map(f => {
+            input.push(torrentId.seedpath + '/' + f.path)
+          })
+          this.seed(input, torrentId.opts, cb)
+        } else this.seed(torrentId.seedpath, torrentId.opts, cb)
       }
-    } else if (!torrentId.done) {
-      this.add(torrentId.meta, torrentId.opts)
+    } else {
+      this.add(torrentId.meta, torrentId.opts, cb)
     }
   }
 }
