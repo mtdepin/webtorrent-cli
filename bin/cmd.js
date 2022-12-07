@@ -72,7 +72,9 @@ const options = {
     'btpart-count': { desc: 'BT pieces part count', type: 'number', requiresArg: true },
     'btpart-index': { desc: 'BT pieces part index', type: 'number', requiresArg: true },
     'torrent-id' : { desc: 'Torrent file', type: 'string', requiresArg: true },
-    'resume-path' : { desc: 'Resume file path', type: 'string', requiresArg: true }
+    'resume-path' : { desc: 'Resume file path', type: 'string', requiresArg: true },
+    'rtc-config': { desc: 'tracker rtc config', type: 'string', requiresArg:true },
+    'save-torrent': { desc: 'save torrent file', type: 'boolean' }
   }
 }
 
@@ -241,6 +243,16 @@ function init (_argv) {
     console.log('\n'.repeat(process.stdout.rows))
     console.clear()
   }
+
+  if (argv.rtcConfig) {
+    let rtcConfig
+    try {
+      rtcConfig = fs.readFileSync(argv.rtcConfig)
+    } catch (err) {
+      return errorAndExit(err)
+    }
+    argv.rtcConfig = rtcConfig
+  }
 }
 
 function runInfo (torrentId) {
@@ -310,15 +322,18 @@ function runPieceDownload(torrentId) {
     btpartIndex: argv.btpartIndex,
     pieceStart: pieceStart,
     pieceEnd: pieceEnd,
-    keepSeeding: argv['keep-seeding'] || false
+    keepSeeding: argv['keep-seeding'] || false,
+    saveTorrent: argv.saveTorrent || false
   }, torrent => {
     console.log('on torrent')
     torrent.on('done', () => {
       console.log('Download done.')
-      gracefulExit()
-      wcl.destroy(() => {
-        setTimeout(() => process.exit(0), 1000).unref()
-      })
+      if (argv.out && !argv['keep-seeding']) {
+        gracefulExit()
+        wcl.destroy(() => {
+          setTimeout(() => process.exit(0), 1000).unref()
+        })
+      }
     })
   })
 }
@@ -709,7 +724,10 @@ function runPieceSeed (input) {
 }
 
 function runDaemon () {
-  let wcl = new WebTorrentCli({resumePath: argv.resumePath})
+  let wcl = new WebTorrentCli({
+    resumePath: argv.resumePath,
+    rtcConfig: argv.rtcConfig
+  })
   let index
   const onCommand = (command, input, opts) => {
     if (command === 'add') {
