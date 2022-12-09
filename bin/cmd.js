@@ -763,11 +763,11 @@ function runDaemon () {
     } else if (command === 'remove') {
       wcl.remove(input, err => {
         if (err) console.log('remove error', input, err)
-      })
+      }, { removeTorrent: opts.removeTorrent || false })
     } else if (command === 'destroy') {
       wcl.destroy(err => {
         if (err) console.log('destroy error', err)
-      })
+      }, { removeTorrent: opts.removeTorrent || false })
     } else if (command === 'quit') {
       console.log('quit..')
       setTimeout(() => process.exit(0), 1000).unref()

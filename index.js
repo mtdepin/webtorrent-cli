@@ -315,6 +315,13 @@ export class WebTorrentCli extends EventEmitter {
   }
 
   remove (torrent, cb, opts = {}) {
+    const rmdir = (path) => {
+      console.log('removeTorrent', path)
+      fs.rm(path, { recursive: true, force: true }, err => {
+        if (err) console.log('removeTorrent error:', err, path)
+      })
+    }
+
     if (typeof torrent === 'number') {
       if (this._torrents.has(torrent)) {
         let t = this._torrents.get(torrent)
@@ -324,31 +331,55 @@ export class WebTorrentCli extends EventEmitter {
       let torrentId = this.getTorrentId(torrent)
       if (torrentId) {
         let t = torrentId._torrent
+        let torrentPath = torrentId.path
+        console.log('remove:', opts, torrentPath)
         this._torrents.delete(torrent)
         if (t) this._client.remove(t, null, cb)
+        if (opts.removeTorrent && typeof torrentPath === 'string') {
+          rmdir(torrentPath)
+        }
       }
       return
     }
 
     if (torrent instanceof Torrent) {
       let index = 0
+      let torrentPath
       for (let entry of this._torrents) {
         if (entry[1]._torrent === torrent) {
           index = entry[0]
+          torrentPath = entry[1].path
           break
         }
       }
       if (index > 0) {
         this._torrents.delete(index)
         this._client.remove(torrent, null, cb)
+        if (opts.removeTorrent && typeof torrentPath === 'string') {
+          rmdir(torrentPath)
+        }
       }
     }
   }
 
-  destroy (cb) {
+  destroy (cb, opts = {}) {
+    const rmdir = (path) => {
+      console.log('removeTorrent', path)
+      fs.rm(path, { recursive: true, force: true }, err => {
+        if (err) console.log('removeTorrent error:', err, path)
+      })
+    }
+
     this.store()
     this.destroyed = true
     this._client.destroy(cb)
+    if (opts.removeTorrent) {
+      let torrentPath
+      for (let entry of this._torrents) {
+        torrentPath = entry[1].path
+        if (typeof torrentPath === 'string') rmdir(torrentPath)
+      }
+    }
     this._torrents.clear()
     this._torrents = null
     this._client = null
