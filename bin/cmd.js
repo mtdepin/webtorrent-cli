@@ -313,6 +313,8 @@ function runPieceDownload(torrentId) {
     pieceStart = parseInt(pieceRange[0])
     pieceEnd = parseInt(pieceRange[1])
   }
+  console.log('runPieceDownload:', Date())
+  const startTime = Date.now()
   let wcl = new WebTorrentCli(argv)
   wcl.add(torrentId, {
     pieceDownload: pieceDownload,
@@ -325,9 +327,15 @@ function runPieceDownload(torrentId) {
     keepSeeding: argv['keep-seeding'] || false,
     saveTorrent: argv.saveTorrent || false
   }, torrent => {
-    console.log('on torrent')
+    console.log('on torrent.', Date())
+    const torrentTime = Date.now()
+    const torrentLength = torrent.length
+    console.log('start download torrent spend millis:', torrentTime - startTime)
     torrent.on('done', () => {
-      console.log('Download done.')
+      console.log('Download done.', Date())
+      const doneTime = Date.now()
+      const spend = doneTime - torrentTime
+      console.log('download torrent spend millis:', spend, 'torrent length:', torrentLength, 'download speed:', torrentLength/(spend/1000))
       if (argv.out && !argv['keep-seeding']) {
         gracefulExit()
         wcl.destroy(() => {
