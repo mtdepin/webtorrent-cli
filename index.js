@@ -5,6 +5,7 @@ import debugFactory from 'debug'
 import Torrent from '../webtorrent/lib/torrent.js'
 import EventEmitter from 'events'
 import * as fs from 'fs'
+import { nanoid } from 'nanoid'
 
 const debug = debugFactory('webtorrent-cli')
 
@@ -119,6 +120,7 @@ export class WebTorrentCli extends EventEmitter {
         fixPath: true,
         announce: opts.announce
       }, torrent => {
+        if (torrent.destroyed) return
         tid.meta = torrent.torrentFile
         tid.path = torrent.path
         this.store()
@@ -133,6 +135,7 @@ export class WebTorrentCli extends EventEmitter {
       })
       const index = this.newTorrent(torrent, opts)
       tid = this.getTorrentId(index)
+      tid.info = torrentId
       torrent.on('infoHash', () => {
         if (opts.select) {
           torrent.so = opts.select.toString()
@@ -162,6 +165,7 @@ export class WebTorrentCli extends EventEmitter {
 
     const index = this.newTorrent(null, opts)
     let tid = this.getTorrentId(index)
+    tid.info = torrentId
     const meta = this.getMeta(torrentId, { announce: opts.announce }, (torrentFile, pieceLength) => {
       let start = opts.pieceStart ?? -1
       let end = opts.pieceEnd ?? -1
@@ -183,6 +187,7 @@ export class WebTorrentCli extends EventEmitter {
         pieceStart: start,
         pieceEnd: end
       }, torrent => {
+        if (torrent.destroyed) return
         tid.info = torrent.infoHash
         tid.meta = torrent.torrentFile
         tid.path = torrent.path
@@ -516,19 +521,27 @@ export class WebTorrentCli extends EventEmitter {
         const torrents = this.parseResumeData(data)
         this._loadCount = torrents.length
         console.log('loadCount', this._loadCount)
-        torrents.map(t => {
-          this.resume(t, () => {
-            --this._loadCount
-            console.log('-loadCount', this._loadCount)
-            if (this._loadCount === 0) {
-              this._loading = false
-              if (this._storePending) {
-                this._storePending = false
-                this.store()
+        if (this._loadCount === 0) {
+          this._loading = false
+          if (this._storePending) {
+            this._storePending = false
+            this.store()
+          }
+        } else {
+          torrents.map(t => {
+            this.resume(t, () => {
+              --this._loadCount
+              console.log('-loadCount', this._loadCount)
+              if (this._loadCount === 0) {
+                this._loading = false
+                if (this._storePending) {
+                  this._storePending = false
+                  this.store()
+                }
               }
-            }
+            })
           })
-        })
+        }
         this._resumeFile = path
         console.log('Resume torrents from file:', path)
       } catch (e) {
@@ -559,5 +572,110 @@ export class WebTorrentCli extends EventEmitter {
     } else {
       this.add(torrentId.meta, torrentId.opts, cb)
     }
+  }
+}
+
+export class MultiWebTorrentCli extends EventEmitter {
+  constructor (opts = {}) {
+    super()
+    this._opts = opts
+    this.clients = new Map()
+    this._saveDir = opts.savePath
+    this._resumeDir = opts.resumePath
+    if (!this._resumeDir && this._saveDir) {
+      this._resumeDir = this._saveDir + '/resume'
+    }
+    this._announce = opts.announce
+    this.load()
+  }
+
+  get torrents() {
+    let data = []
+    for (let entry of this.clients) {
+      const wtcId = entry[0]
+      const client = entry[1]
+      const ts = client.torrents
+      ts.forEach(t => {
+        data.push({
+          clinet: wtcId,
+          index: t.index,
+          infohash: t.infohash,
+          done: t.done,
+          seeding: t.seeding,
+          progress: t.progress
+        })
+      })
+    }
+    return data
+  }
+
+  newClient (wtcId) {
+    const id = wtcId ? wtcId : nanoid()
+    let opts = Object.assign({}, this._opts)
+    if (this._resumeDir) {
+      opts.resumePath = this._resumeDir + '/' + id
+    }
+    let c = new WebTorrentCli(opts)
+    this.clients.set(id, c)
+    c.on('error', err => {
+      console.log(chalk`{red Error:} ${err.message || err}`)
+    })
+    return c
+  }
+
+  getClient (wtcId) {
+    if (wtcId) {
+      if (this.clients.has(wtcId)) return this.clients.get(wtcId)
+      else return null
+    }
+    const maxClientTorrents = 50
+    for (let c of this.clients.values()) {
+      if (c._torrents.size < maxClientTorrents) return c
+    }
+    
+    return this.newClient()
+  }
+
+  add (torrentId, opts = {}, ontorrent) {
+    const client = this.getClient()
+    if (!opts.out && this._saveDir) opts.out = this._saveDir
+    if (!opts.announce && this._announce) opts.announce = this._announce
+    client.add(torrentId, opts, ontorrent)
+  }
+
+  seed (input, opts, onseed) {
+    const client = this.getClient()
+    if (!opts.announce && this._announce) opts.announce = this._announce
+    client.seed(input, opts, onseed)
+  }
+
+  load () {
+    if (!this._resumeDir) return
+    let st = fs.statSync(this._resumeDir, {throwIfNoEntry: false})
+    if (!st) {
+      fs.mkdir(this._resumeDir, { recursive: true }, err => {
+        if (err) {
+          console.log('mkdir error:', this._resumeDir, err.name, err.message)
+        }
+      })
+      return
+    }
+    if (!st.isDirectory()) {
+      console.log('path %s is not a directory', this._resumeDir)
+      this._loading = false
+      return
+    }
+    const names = fs.readdirSync(this._resumeDir)
+    if (names.length == 0) return
+    let path
+    names.forEach(name => {
+      if (name.length > 20) {
+        path = this._resumeDir + '/' + name
+        st = fs.statSync(path, {throwIfNoEntry: false})
+        if (st && st.isDirectory()) {
+          this.newClient(name)
+        }
+      }
+    });
   }
 }
