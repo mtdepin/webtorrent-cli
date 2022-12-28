@@ -16,7 +16,7 @@ import prettierBytes from 'prettier-bytes'
 import stripIndent from 'common-tags/lib/stripIndent/index.js'
 import vlcCommand from 'vlc-command'
 import WebTorrent from '../../webtorrent/index.js'
-import { WebTorrentCli } from '../index.js'
+import { WebTorrentCli, MultiWebTorrentCli } from '../index.js'
 import Yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import open from 'open'
@@ -73,6 +73,7 @@ const options = {
     'btpart-index': { desc: 'BT pieces part index', type: 'number', requiresArg: true },
     'torrent-id' : { desc: 'Torrent file', type: 'string', requiresArg: true },
     'resume-path' : { desc: 'Resume file path', type: 'string', requiresArg: true },
+    'save-path' : { desc: 'Save file path', type: 'string', requiresArg: true },
     'rtc-config': { desc: 'tracker rtc config', type: 'string', requiresArg:true },
     'save-torrent': { desc: 'save torrent file', type: 'boolean' }
   }
@@ -732,55 +733,128 @@ function runPieceSeed (input) {
 }
 
 function runDaemon () {
-  let wcl = new WebTorrentCli({
+  let client = new MultiWebTorrentCli({
     resumePath: argv.resumePath,
-    rtcConfig: argv.rtcConfig
+    rtcConfig: argv.rtcConfig,
+    announce: argv.announce,
+    savePath: argv.savePath
   })
-  let index
+  const resultOk = '{"status": "ok"}'
   const onCommand = (command, input, opts) => {
     if (command === 'add') {
-      index = wcl.add(input, {
+      client.add(input, {
         pieceDownload: opts.pieceDownload || false,
         out: opts.out,
         announce: opts.announce,
         btpartCount: opts.btpartCount,
         btpartIndex: opts.btpartIndex,
+        pieceStart: opts.pieceStart,
+        pieceEnd: opts.pieceEnd,
         keepSeeding: opts.keepSeeding || false,
         saveTorrent: opts.saveTorrent || false
       }, torrent => {
         console.log('on torrent:', input)
       })
-      console.log('add:', index)
+      console.log('add:', input)
+      return resultOk
     } else if (command === 'seed') {
-      index = wcl.seed(input, {
+      client.seed(input, {
         announce: opts.announce,
         pieceSeed: opts.pieceSeed || false,
         btpartCount: opts.btpartCount,
         btpartIndex: opts.btpartIndex,
+        pieceStart: opts.pieceStart,
+        pieceEnd: opts.pieceEnd,
         torrentId: opts.torrentId
       }, torrent => {
         console.log(torrent.magnetURI)
       })
-      console.log('seed:', index)
+      console.log('seed:', input)
+      return resultOk
     } else if (command === 'list') {
-      let list = wcl.torrents
+      let list = client.torrents
       console.log('list:', list)
+      let rs = []
+      if (input) {
+        let t = list.find(item => item.infohash === input)
+        if (t) {
+          let s = 'wait'
+          if (t.seeding || t.done || t.progress > 0.001) s = 'ready'
+          rs.push({
+            status: s,
+            infohash: t.infohash,
+            done: t.done,
+            seeding: t.seeding,
+            progress: t.progress
+          })
+        } else {
+          return '{"error": "Not found"}'
+        }
+      } else {
+        list.forEach(t => {
+          let s = 'wait'
+          if (t.seeding || t.done || t.progress > 0.001) s = 'ready'
+          rs.push({
+            status: s,
+            infohash: t.infohash,
+            done: t.done,
+            seeding: t.seeding,
+            progress: t.progress
+          })
+        })
+      }
+      console.log('rs', rs)
+      return JSON.stringify(rs)
     } else if (command === 'progress') {
-      let p = wcl.progress
-      console.log('progress:', p)
+      let t = getTorrent(input)
+      if (t) {
+        let p = t.progress
+        console.log('progress:', p)
+        return JSON.stringify({progress: p})
+      } else {
+        return '{"error": "Not found"}'
+      }
     } else if (command === 'remove') {
-      wcl.remove(input, err => {
-        if (err) console.log('remove error', input, err)
-      }, { removeTorrent: opts.removeTorrent || false })
+      let t = getTorrent(input)
+      if (t) {
+        let wtc = client.getClient(t.client)
+        if (wtc) {
+          wtc.remove(t.index, err => {
+            if (err) console.log('remove error', input, err)
+          }, { removeTorrent: opts.removeTorrent || false })
+        }
+        return resultOk
+      } else {
+        return '{"status": "fail", "error": "Not found"}'
+      }
     } else if (command === 'destroy') {
-      wcl.destroy(err => {
-        if (err) console.log('destroy error', err)
-      }, { removeTorrent: opts.removeTorrent || false })
+      let wtc = client.getClient(input)
+      if (wtc) {
+        wtc.destroy(err => {
+          if (err) console.log('destroy error', err)
+        }, { removeTorrent: opts.removeTorrent || false })
+        return resultOk
+      }
     } else if (command === 'quit') {
       console.log('quit..')
       setTimeout(() => process.exit(0), 1000).unref()
+      return resultOk
+    } else if (command === 'config') {
+      return JSON.stringify({
+        resumePath: argv.resumePath,
+        rtcConfig: argv['rtc-config'],
+        announce: argv.announce ? [].concat(argv.announce) : undefined,
+        savePath: argv.savePath
+      })
     }
+    return '{"status": "fail", "error": "invalid command"}'
   }
+
+  const getTorrent = (infohash) => {
+    let list = client.torrents
+    let t = list.find(item => item.infohash === infohash)
+    return t
+  };
 
   const server = net.createServer(c => {
     console.log('client connected:', c.address())
@@ -789,16 +863,17 @@ function runDaemon () {
     })
     c.on('data', data => {
       console.log('recved:', data.toString())
-      c.write(data)
       const requstParser = Yargs()
       let opts = requstParser.parse(data.toString())
       console.log(opts)
       console.log('argv:', opts._, opts._.length, opts._[0])
+      let result = '{"status": "fail", "error": "invalid command"}'
       if (opts._.length > 1) {
-        onCommand(opts._[0], opts._[1], opts)
+        result = onCommand(opts._[0], opts._[1], opts)
       } else if (opts._.length > 0) {
-        onCommand(opts._[0], null, opts)
+        result = onCommand(opts._[0], null, opts)
       }
+      c.write(result)
     })
   })
   server.on('error', err => {
