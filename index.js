@@ -220,8 +220,8 @@ export class WebTorrentCli extends EventEmitter {
       })
       torrent.on('ready', () => {
         debug('on ready, select %s-%s', start, end)
-        torrent.so = ''
-        torrent.select(start, end, false)
+        //torrent.so = ''
+        //torrent.select(start, end, false)
       })
       torrent.on('close', () => {
         if (this._torrents.has(index)) this._torrents.delete(index)
@@ -436,7 +436,7 @@ export class WebTorrentCli extends EventEmitter {
       data.push({
         index: t.index,
         info: t.info,
-        meta: Buffer.from(JSON.parse(t.meta).data),
+        meta: (t.meta && t.meta !== 'null') ? Buffer.from(JSON.parse(t.meta).data) : null,
         seeding: t.seeding,
         seedpath: t.seedpath,
         seedfiles: t.seedfiles,
@@ -570,7 +570,7 @@ export class WebTorrentCli extends EventEmitter {
         if (typeof cb === 'function') cb()
       }
     } else {
-      this.add(torrentId.meta, torrentId.opts, cb)
+      this.add(torrentId.meta ? torrentId.meta : torrentId.info, torrentId.opts, cb)
     }
   }
 }
