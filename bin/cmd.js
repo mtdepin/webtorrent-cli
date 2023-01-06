@@ -83,7 +83,7 @@ const commands = [
   { command: ['download [torrent-ids...]', '$0'], desc: 'Download a torrent', handler: (args) => { processInputs(args.torrentIds, runDownload) } },
   { command: 'downloadmeta <torrent-ids...>', desc: 'Download metadata of torrent', handler: (args) => { processInputs(args.torrentIds, runDownloadMeta) } },
   { command: 'seed <inputs...>', desc: 'Seed a file or a folder', handler: (args) => { processInputs(args.inputs, runSeed) } },
-  { command: 'pieceseed <inputs...>', desc: 'Seed pieces from a file or a folder', handler: (args) => { processInputs(args.inputs, runPieceSeed) } },
+  { command: 'pieceseed <inputs...>', desc: 'Seed pieces from a file or a folder', handler: (args) => { runPieceSeed(args.inputs) } },
   { command: 'create <input>', desc: 'Create a .torrent file', handler: (args) => { runCreate(args.input) } },
   { command: 'piecedownload <input>', desc: 'Download Pieces from torrent', handler: (args) => { runPieceDownload(args.input) } },
   { command: 'info <torrent-id>', desc: 'Show torrent information', handler: (args) => { runInfo(args.torrentId) } },
@@ -308,11 +308,18 @@ function runCreate (input) {
 
 function runPieceDownload(torrentId) {
   let pieceDownload = (argv.btpartCount || argv.pieceSelect) ? true : false
-  let pieceStart, pieceEnd
+  let pieceRange = []
   if (argv.pieceSelect) {
-    let pieceRange = argv.pieceSelect.split(' ')
-    pieceStart = parseInt(pieceRange[0])
-    pieceEnd = parseInt(pieceRange[1])
+    const selections = [].concat(argv.pieceSelect)
+    for (const s of selections) {
+      const range = s.split(' ')
+      pieceRange.push({
+        pieceStart: parseInt(range[0]),
+        pieceEnd: parseInt(range[1])
+      })
+    }
+  } else {
+    pieceRange = null
   }
   console.log('runPieceDownload:', Date())
   const startTime = Date.now()
@@ -323,8 +330,9 @@ function runPieceDownload(torrentId) {
     announce: argv.announce,
     btpartCount: argv.btpartCount,
     btpartIndex: argv.btpartIndex,
-    pieceStart: pieceStart,
-    pieceEnd: pieceEnd,
+    pieceStart: argv.pieceStart,
+    pieceEnd: argv.pieceEnd,
+    pieceRange:  pieceRange,
     keepSeeding: argv['keep-seeding'] || false,
     saveTorrent: argv.saveTorrent || false
   }, torrent => {
@@ -712,20 +720,29 @@ function runSeed (input) {
 
 function runPieceSeed (input) {
   let pieceSeed = (argv.btpartCount || argv.pieceSelect) ? true : false
-  let pieceStart, pieceEnd
+  let pieceRange = []
   if (argv.pieceSelect) {
-    let pieceRange = argv.pieceSelect.split(' ')
-    pieceStart = parseInt(pieceRange[0])
-    pieceEnd = parseInt(pieceRange[1])
+    const selections = [].concat(argv.pieceSelect)
+    for (const s of selections) {
+      const range = s.split(' ')
+      pieceRange.push({
+        pieceStart: parseInt(range[0]),
+        pieceEnd: parseInt(range[1])
+      })
+    }
+  } else {
+    pieceRange = null
   }
+  console.log('runPieceSeed:', input, pieceRange)
   let wcl = new WebTorrentCli(argv)
   wcl.seed(input, {
     announce: argv.announce,
     pieceSeed: pieceSeed,
     btpartCount: argv.btpartCount,
     btpartIndex: argv.btpartIndex,
-    pieceStart: pieceStart,
-    pieceEnd: pieceEnd,
+    pieceStart: argv.pieceStart,
+    pieceEnd: argv.pieceEnd,
+    pieceRange: pieceRange,
     torrentId: argv.torrentId
   }, torrent => {
     console.log(torrent.magnetURI)
@@ -741,6 +758,18 @@ function runDaemon () {
   })
   const resultOk = '{"status": "ok"}'
   const onCommand = (command, input, opts) => {
+    let pieceRange
+    if (opts.pieceSelect) {
+      const selections = [].concat(opts.pieceSelect)
+      pieceRange = []
+      for (const s of selections) {
+        const range = s.split(' ')
+        pieceRange.push({
+          pieceStart: parseInt(range[0]),
+          pieceEnd: parseInt(range[1])
+        })
+      }
+    }
     if (command === 'add') {
       client.add(input, {
         pieceDownload: opts.pieceDownload || false,
@@ -750,6 +779,7 @@ function runDaemon () {
         btpartIndex: opts.btpartIndex,
         pieceStart: opts.pieceStart,
         pieceEnd: opts.pieceEnd,
+        pieceRange: pieceRange,
         keepSeeding: opts.keepSeeding || false,
         saveTorrent: opts.saveTorrent || false
       }, torrent => {
@@ -765,12 +795,24 @@ function runDaemon () {
         btpartIndex: opts.btpartIndex,
         pieceStart: opts.pieceStart,
         pieceEnd: opts.pieceEnd,
+        pieceRange: pieceRange,
         torrentId: opts.torrentId
       }, torrent => {
         console.log(torrent.magnetURI)
       })
       console.log('seed:', input)
       return resultOk
+    } else if (command === 'append') {
+      let t = getTorrent(input)
+      if (t) {
+        let wtc = client.getClient(t.client)
+        if (wtc) {
+          wtc.append(t.index, opts.pieceStart, opts.pieceEnd, opts.seedPath)
+        }
+        return resultOk
+      } else {
+        return '{"status": "fail", "error": "Not found"}'
+      }
     } else if (command === 'list') {
       let list = client.torrents
       console.log('list:', list)
