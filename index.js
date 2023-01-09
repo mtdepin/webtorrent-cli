@@ -274,7 +274,7 @@ export class WebTorrentCli extends EventEmitter {
         start = y * part
         end = start + part -1
         if (end > pieceLength - 1) end = pieceLength - 1
-      } else if (opts.pieceStart && opts.pieceEnd) {
+      } else if ((typeof opts.pieceStart === 'number') && (typeof opts.pieceEnd === 'number')) {
         start = opts.pieceStart
         end = opts.pieceEnd
       }
