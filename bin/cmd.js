@@ -21,6 +21,17 @@ import Yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import open from 'open'
 import net from 'node:net'
+import log4js from 'log4js'
+
+log4js.configure({
+  appenders: {
+    WebTorrentCmd: { type: 'file', filename: 'webtorrent.log' },
+  },
+  categories: {
+    default: { appenders: ['WebTorrentCmd'], level: 'debug' },
+  },
+})
+const logger = log4js.getLogger()
 
 const { version: webTorrentCliVersion } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)))
 const webTorrentVersion = WebTorrent.VERSION
@@ -359,13 +370,19 @@ async function runDownload (torrentId) {
   if (!argv.out && !argv.stdout && !playerName) {
     argv.out = process.cwd()
   }
+  let tracker
+  if (argv.rtcConfig) {
+    let a = JSON.parse(argv.rtcConfig)
+    if (a) tracker = { rtcConfig: a }
+  }
 
   client = new WebTorrent({
     blocklist: argv.blocklist,
     torrentPort: argv['torrent-port'],
     dhtPort: argv['dht-port'],
     downloadLimit: argv.downloadLimit,
-    uploadLimit: argv.uploadLimit
+    uploadLimit: argv.uploadLimit,
+    tracker: tracker
   })
   client.on('error', fatalError)
 
@@ -784,8 +801,10 @@ function runDaemon () {
         saveTorrent: opts.saveTorrent || false
       }, torrent => {
         console.log('on torrent:', input)
+        logger.info('on torrent:', input)
       })
       console.log('add:', input)
+      logger.info('add:', input, opts)
       return resultOk
     } else if (command === 'seed') {
       client.seed(input, {
@@ -799,8 +818,10 @@ function runDaemon () {
         torrentId: opts.torrentId
       }, torrent => {
         console.log(torrent.magnetURI)
+        logger.info(torrent.magnetURI)
       })
       console.log('seed:', input)
+      logger.info('seed:', input, opts)
       return resultOk
     } else if (command === 'append') {
       let t = getTorrent(input)
@@ -809,8 +830,10 @@ function runDaemon () {
         if (wtc) {
           wtc.append(t.index, opts.pieceStart, opts.pieceEnd, opts.seedPath)
         }
+        logger.info('append:', input)
         return resultOk
       } else {
+        logger.info('append: Not found', input)
         return '{"status": "fail", "error": "Not found"}'
       }
     } else if (command === 'list') {
@@ -829,6 +852,7 @@ function runDaemon () {
             seeding: t.seeding,
             progress: t.progress
           })
+          logger.info('list:', input, rs)
         } else {
           return '{"error": "Not found"}'
         }
@@ -852,8 +876,10 @@ function runDaemon () {
       if (t) {
         let p = t.progress
         console.log('progress:', p)
+        logger.info('progress:', input, p)
         return JSON.stringify({progress: p})
       } else {
+        logger.info('progress: Not found', input)
         return '{"error": "Not found"}'
       }
     } else if (command === 'remove') {
@@ -862,11 +888,16 @@ function runDaemon () {
         let wtc = client.getClient(t.client)
         if (wtc) {
           wtc.remove(t.index, err => {
-            if (err) console.log('remove error', input, err)
+            if (err) {
+              console.log('remove error', input, err)
+              logger.error('remove error', input, err)
+            }
           }, { removeTorrent: opts.removeTorrent || false })
+          logger.info('remove:', input)
         }
         return resultOk
       } else {
+        logger.info('remove: Not found', input)
         return '{"status": "fail", "error": "Not found"}'
       }
     } else if (command === 'destroy') {
