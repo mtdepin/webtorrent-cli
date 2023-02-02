@@ -751,7 +751,9 @@ function runPieceSeed (input) {
     pieceRange = null
   }
   console.log('runPieceSeed:', input, pieceRange)
-  let wcl = new WebTorrentCli(argv)
+  //let wcl = new WebTorrentCli(argv)
+  let wcl = new MultiWebTorrentCli(argv)
+  /*
   wcl.seed(input, {
     announce: argv.announce,
     pieceSeed: pieceSeed,
@@ -764,9 +766,69 @@ function runPieceSeed (input) {
   }, torrent => {
     console.log(torrent.magnetURI)
   })
+  */
+
+  const opts = {
+    announce: argv.announce,
+    pieceSeed: pieceSeed,
+    btpartCount: argv.btpartCount,
+    btpartIndex: argv.btpartIndex,
+    pieceStart: argv.pieceStart,
+    pieceEnd: argv.pieceEnd,
+    pieceRange: pieceRange,
+    torrentId: argv.torrentId
+  }
+
+  let fQueue = []
+
+  input.forEach(path => {
+    iterFolder(path, f => {
+      fQueue.push(f)
+    })
+  })
+
+  let index = 0
+  runSeedWork()
+
+  function runSeedWork () {
+    if (index < fQueue.length) {
+      console.log('runSeedWork:', index, fQueue[index])
+      wcl.seed(fQueue[index], opts, torrent => {
+        console.log(torrent.magnetURI)
+        index += 1
+        runSeedWork()
+      })
+    }
+  }
+
+  function iterFolder (path, cb) {
+    let st = fs.statSync(path, {throwIfNoEntry: false})
+    if (!st) return
+    if (st.isDirectory()) {
+      const names = fs.readdirSync(path)
+      if (names.length == 0) return
+      names.forEach(name => {
+        if (name.length > 2) {
+          iterFolder(path + '/' + name, cb)
+        }
+      })
+    } else if (st.isFile()) {
+      if (typeof cb === 'function') cb(path)
+    }
+  }
 }
 
 function runDaemon () {
+  const format = function (bytes) {
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB'
+  }
+
+  const memUsage = function () {
+    const memoryUsage = process.memoryUsage()
+    logger.info(`heapTotal: ${format(memoryUsage.heapTotal)}, heapUsed: ${format(memoryUsage.heapUsed)}`)
+    logger.info(memoryUsage)
+  }
+
   let client = new MultiWebTorrentCli({
     resumePath: argv.resumePath,
     rtcConfig: argv.rtcConfig,
@@ -802,6 +864,7 @@ function runDaemon () {
       }, torrent => {
         console.log('on torrent:', input)
         logger.info('on torrent:', input)
+        memUsage()
       })
       console.log('add:', input)
       logger.info('add:', input, opts)
@@ -819,6 +882,7 @@ function runDaemon () {
       }, torrent => {
         console.log(torrent.magnetURI)
         logger.info(torrent.magnetURI)
+        memUsage()
       })
       console.log('seed:', input)
       logger.info('seed:', input, opts)
@@ -919,6 +983,9 @@ function runDaemon () {
         announce: argv.announce ? [].concat(argv.announce) : undefined,
         savePath: argv.savePath
       })
+    } else if (command === 'memstat') {
+      memUsage()
+      return resultOk
     }
     return '{"status": "fail", "error": "invalid command"}'
   }
@@ -1031,6 +1098,10 @@ function drawTorrent (torrent) {
         }}  {green Blocked peers:} {bold ${blockedPeers
         }}  {green Hotswaps:} {bold ${hotswaps
         }}`)
+
+      if (torrent.bitfield) {
+        line(chalk`{green Bitfield:} ${torrent.bitfield.buffer}`)
+      }
     }
 
     line('')

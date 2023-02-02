@@ -721,7 +721,7 @@ export class MultiWebTorrentCli extends EventEmitter {
       if (this.clients.has(wtcId)) return this.clients.get(wtcId)
       else return null
     }
-    const maxClientTorrents = 50
+    const maxClientTorrents = 10
     for (let c of this.clients.values()) {
       if (c._torrents.size < maxClientTorrents) return c
     }
