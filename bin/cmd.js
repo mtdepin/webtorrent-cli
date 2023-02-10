@@ -825,8 +825,8 @@ function runDaemon () {
 
   const memUsage = function () {
     const memoryUsage = process.memoryUsage()
-    logger.info(`heapTotal: ${format(memoryUsage.heapTotal)}, heapUsed: ${format(memoryUsage.heapUsed)}`)
-    logger.info(memoryUsage)
+    console.log(`heapTotal: ${format(memoryUsage.heapTotal)}, heapUsed: ${format(memoryUsage.heapUsed)}`)
+    console.log(memoryUsage)
   }
 
   let client = new MultiWebTorrentCli({
@@ -860,8 +860,9 @@ function runDaemon () {
         pieceEnd: opts.pieceEnd,
         pieceRange: pieceRange,
         keepSeeding: opts.keepSeeding || false,
-        saveTorrent: opts.saveTorrent || false
-      }, torrent => {
+        saveTorrent: opts.saveTorrent || false,
+        timeout: opts.setTimeout
+      }, _torrent => {
         console.log('on torrent:', input)
         logger.info('on torrent:', input)
         memUsage()
@@ -903,18 +904,28 @@ function runDaemon () {
     } else if (command === 'list') {
       let list = client.torrents
       console.log('list:', list)
+
+      const torrentStatus = (t) => {
+        let s = 'wait'
+        if (t.paused) {
+          s = 'paused'
+        } else if (t.seeding) {
+          s = 'seeding'
+        } else if (t.done || t.progress > 0.001) {
+          s = 'ready'
+        }
+        return s
+      }
+
       let rs = []
       if (input) {
         let t = list.find(item => item.infohash === input)
         if (t) {
-          let s = 'wait'
-          if (t.seeding || t.done || t.progress > 0.001) s = 'ready'
           rs.push({
-            status: s,
+            status: torrentStatus(t),
             infohash: t.infohash,
-            done: t.done,
-            seeding: t.seeding,
-            progress: t.progress
+            progress: t.progress,
+            seedfiles: t.seedfiles
           })
           logger.info('list:', input, rs)
         } else {
@@ -922,18 +933,14 @@ function runDaemon () {
         }
       } else {
         list.forEach(t => {
-          let s = 'wait'
-          if (t.seeding || t.done || t.progress > 0.001) s = 'ready'
           rs.push({
-            status: s,
+            status: torrentStatus(t),
             infohash: t.infohash,
-            done: t.done,
-            seeding: t.seeding,
-            progress: t.progress
+            progress: t.progress,
+            seedfiles: t.seedfiles
           })
         })
       }
-      console.log('rs', rs)
       return JSON.stringify(rs)
     } else if (command === 'progress') {
       let t = getTorrent(input)
@@ -986,6 +993,50 @@ function runDaemon () {
     } else if (command === 'memstat') {
       memUsage()
       return resultOk
+    } else if (command === 'pause') {
+      let t = getTorrent(input)
+      if (t) {
+        let wtc = client.getClient(t.client)
+        if (wtc) {
+          const r = wtc.pause(t.index, err => {
+            if (err) {
+              console.log('pause error', input, err)
+              logger.error('pause error', input, err)
+            }
+          })
+          if (r === false) {
+            logger.error('pause failed', input)
+            return '{"status": "fail", "error": "Invalid params"}'
+          } 
+          logger.info('pause:', input)
+        }
+        return resultOk
+      } else {
+        logger.info('pause: Not found', input)
+        return '{"status": "fail", "error": "Not found"}'
+      }
+    } else if (command === 'resume') {
+      let t = getTorrent(input)
+      if (t) {
+        let wtc = client.getClient(t.client)
+        if (wtc) {
+          const r = wtc.resume(t.index, err => {
+            if (err) {
+              console.log('resume error', input, err)
+              logger.error('resume error', input, err)
+            }
+          })
+          if (r === false) {
+            logger.error('resume failed', input)
+            return '{"status": "fail", "error": "Invalid params"}'
+          } 
+          logger.info('resume:', input)
+        }
+        return resultOk
+      } else {
+        logger.info('resume: Not found', input)
+        return '{"status": "fail", "error": "Not found"}'
+      }
     }
     return '{"status": "fail", "error": "invalid command"}'
   }
@@ -1025,9 +1076,21 @@ function runDaemon () {
   } catch (error) {
     console.log('unlink error:', error.name, error.message)
   }
-  server.listen(sock, () => {
-    console.log('server bound.')
-  })
+
+  const startServer = () => {
+    server.listen(sock, () => {
+      console.log('server bound.')
+    })
+  }
+
+  if (client._loadCount === 0) {
+    startServer()
+  } else {
+    client.once('loaded', () => {
+      console.log('client complete load.')
+      startServer()
+    })
+  }
 }
 
 function drawTorrent (torrent) {
