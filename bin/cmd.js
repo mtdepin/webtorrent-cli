@@ -86,6 +86,7 @@ const options = {
     'resume-path' : { desc: 'Resume file path', type: 'string', requiresArg: true },
     'save-path' : { desc: 'Save file path', type: 'string', requiresArg: true },
     'rtc-config': { desc: 'tracker rtc config', type: 'string', requiresArg:true },
+    'announce-auth': { desc: 'Tracker URL announce auth', type: 'string', requiresArg:true },
     'save-torrent': { desc: 'save torrent file', type: 'boolean' }
   }
 }
@@ -388,7 +389,8 @@ async function runDownload (torrentId) {
 
   const torrent = client.add(torrentId, {
     path: argv.out,
-    announce: argv.announce
+    announce: argv.announce,
+    announceAuth: argv.announceAuth
   })
 
   if (argv.verbose) {
@@ -714,18 +716,26 @@ function runSeed (input) {
     return
   }
 
+  let tracker
+  if (argv.rtcConfig) {
+    let a = JSON.parse(argv.rtcConfig)
+    if (a) tracker = { rtcConfig: a }
+  }
+
   client = new WebTorrent({
     blocklist: argv.blocklist,
     torrentPort: argv['torrent-port'],
     dhtPort: argv['dht-port'],
     downloadLimit: argv.downloadLimit,
-    uploadLimit: argv.uploadLimit
+    uploadLimit: argv.uploadLimit,
+    tracker: tracker
   })
 
   client.on('error', fatalError)
 
   client.seed(input, {
-    announce: argv.announce
+    announce: argv.announce,
+    announceAuth: argv.announceAuth
   }, torrent => {
     if (argv.quiet) {
       console.log(torrent.magnetURI)
@@ -941,7 +951,7 @@ function runDaemon () {
           })
         })
       }
-      return JSON.stringify(rs)
+      return JSON.stringify({"data": rs})
     } else if (command === 'progress') {
       let t = getTorrent(input)
       if (t) {

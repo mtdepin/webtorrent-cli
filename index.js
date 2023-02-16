@@ -209,7 +209,10 @@ export class WebTorrentCli extends EventEmitter {
         fixPath: true,
         announce: opts.announce
       }, torrent => {
-        if (torrent.destroyed) return
+        if (torrent.destroyed) {
+          this._onTorrentClose(tid._id)
+          return
+        }
         tid.meta = torrent.torrentFile
         tid.path = torrent.path
         this.store()
@@ -260,7 +263,7 @@ export class WebTorrentCli extends EventEmitter {
     let tid = index !== null ? this.getTorrentId(index) : null
     if (!tid) return null
     tid.info = torrentId
-    const meta = this.getMeta(torrentId, { announce: opts.announce }, (torrentFile, pieceLength) => {
+    const meta = this.getMeta(index, torrentId, { announce: opts.announce }, (torrentFile, pieceLength) => {
       let start, end
       if (opts.btpartCount && opts.btpartIndex) {
         let x = opts.btpartCount
@@ -289,7 +292,10 @@ export class WebTorrentCli extends EventEmitter {
         pieceEnd: end,
         pieceRange: opts.pieceRange
       }, torrent => {
-        if (torrent.destroyed) return
+        if (torrent.destroyed) {
+          this._onTorrentClose(index)
+          return
+        }
         tid.info = torrent.infoHash
         tid.meta = torrent.torrentFile
         tid.path = torrent.path
@@ -346,6 +352,10 @@ export class WebTorrentCli extends EventEmitter {
       let torrentId
       const torrent = this._client.seed(input, {announce: opts.announce}, torrent => {
         if (torrentId) {
+          if (torrent.destroyed) {
+            this._onTorrentClose(torrentId._id)
+            return
+          }
           torrentId.seeding = true
           torrentId.seedPath = torrent.path
           torrentId.seedFiles = torrent.files.map(f => f.path)
@@ -369,7 +379,7 @@ export class WebTorrentCli extends EventEmitter {
     const index = this.newTorrent(null, opts)
     let torrentId = index !== null ? this.getTorrentId(index) : null
     if (!torrentId) return null
-    const meta = this.getMeta(opts.torrentId, null, (torrentFile, pieceLength) => {
+    const meta = this.getMeta(index, opts.torrentId, null, (torrentFile, pieceLength) => {
       let start, end
       if (opts.btpartCount && opts.btpartIndex) {
         let x = opts.btpartCount
@@ -393,6 +403,10 @@ export class WebTorrentCli extends EventEmitter {
         pieceEnd: end,
         pieceRange: opts.pieceRange
       }, torrent => {
+        if (torrent.destroyed) {
+          this._onTorrentClose(index)
+          return
+        }
         console.log('runPieceSeed: ontorrent')
         torrent.on('infoHash', () => {
           torrent.so = 'x'
@@ -432,10 +446,18 @@ export class WebTorrentCli extends EventEmitter {
     if (torrentId) {
       let t = torrentId._torrent
       console.log('append:', torrentId.info, pieceStart, pieceEnd, path)
+
+      const onMetadata = () => {
+        this.append(torrent, pieceStart, pieceEnd, path)
+      }
       if (!t.metadata) {
-        t.once('metadata', () => {
-          this.append(torrent, pieceStart, pieceEnd, path)
-        })
+        t.once('metadata', onMetadata)
+        return
+      }
+      const ret = t.addPiece(pieceStart, pieceEnd, path)
+      if (!ret) {
+        console.log('append failed')
+        t.removeListener('metadata', onMetadata)
         return
       }
       if (!torrentId.appendOpts) torrentId.appendOpts = []
@@ -445,9 +467,7 @@ export class WebTorrentCli extends EventEmitter {
         path: path
       })
       console.log('append: push appendOpts', torrentId.appendOpts, torrentId._opts.pieceRange)
-      t.addPiece(pieceStart, pieceEnd, path)
       torrentId.done = false
-      console.log('append: final', torrentId._opts.pieceRange)
       this.store()
 
       t.on('done', () => {
@@ -565,11 +585,13 @@ export class WebTorrentCli extends EventEmitter {
     this._resumeFile = null
   }
 
-  getMeta (torrentId, opts = {}, cb = () => {}) {
+  getMeta (index, torrentId, opts = {}, cb = () => {}) {
     let torrent = this._client.add(torrentId, {
       store: MemoryChunkStore,
       announce: opts ? opts.announce : null,
       mdonly: true
+    }, torrent => {
+      if (torrent.destroyed) this._onTorrentClose(index)
     })
     torrent.on('metadata', () => {
       let count = torrent.pieces.length
@@ -908,12 +930,18 @@ export class MultiWebTorrentCli extends EventEmitter {
       console.log('Error:', err.message || err)
       logger.error('Error:', err.message || err)
     })
-    c.on('loaded', () => {
+
+    const onLoad = () => {
       --this._loadCount
       if (this._loadCount === 0) {
         this.emit('loaded')
       }
-    })
+    }
+    if (c._loading) {
+      c.on('loaded', onLoad)
+    } else {
+      onLoad()
+    }
     return c
   }
 
