@@ -21,17 +21,6 @@ import Yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import open from 'open'
 import net from 'node:net'
-import log4js from 'log4js'
-
-log4js.configure({
-  appenders: {
-    WebTorrentCmd: { type: 'file', filename: 'webtorrent.log' },
-  },
-  categories: {
-    default: { appenders: ['WebTorrentCmd'], level: 'debug' },
-  },
-})
-const logger = log4js.getLogger()
 
 const { version: webTorrentCliVersion } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url)))
 const webTorrentVersion = WebTorrent.VERSION
@@ -87,7 +76,9 @@ const options = {
     'save-path' : { desc: 'Save file path', type: 'string', requiresArg: true },
     'rtc-config': { desc: 'tracker rtc config', type: 'string', requiresArg:true },
     'announce-auth': { desc: 'Tracker URL announce auth', type: 'string', requiresArg:true },
-    'save-torrent': { desc: 'save torrent file', type: 'boolean' }
+    'save-torrent': { desc: 'save torrent file', type: 'boolean' },
+    'disable-dht': { desc: 'disable DHT', type: 'boolean' },
+    'disable-lsd': { desc: 'disable LSD', type: 'boolean' }
   }
 }
 
@@ -383,7 +374,9 @@ async function runDownload (torrentId) {
     dhtPort: argv['dht-port'],
     downloadLimit: argv.downloadLimit,
     uploadLimit: argv.uploadLimit,
-    tracker: tracker
+    tracker: tracker,
+    dht: argv.disableDht === true ? false : true,
+    lsd: argv.disableLsd === true ? false : true
   })
   client.on('error', fatalError)
 
@@ -728,7 +721,9 @@ function runSeed (input) {
     dhtPort: argv['dht-port'],
     downloadLimit: argv.downloadLimit,
     uploadLimit: argv.uploadLimit,
-    tracker: tracker
+    tracker: tracker,
+    dht: argv.disableDht === true ? false : true,
+    lsd: argv.disableLsd === true ? false : true
   })
 
   client.on('error', fatalError)
@@ -843,7 +838,9 @@ function runDaemon () {
     resumePath: argv.resumePath,
     rtcConfig: argv.rtcConfig,
     announce: argv.announce,
-    savePath: argv.savePath
+    savePath: argv.savePath,
+    disableDht: argv.disableDht,
+    disableLsd: argv.disableLsd
   })
   const resultOk = '{"status": "ok"}'
   const onCommand = (command, input, opts) => {
@@ -874,11 +871,9 @@ function runDaemon () {
         timeout: opts.setTimeout
       }, _torrent => {
         console.log('on torrent:', input)
-        logger.info('on torrent:', input)
         memUsage()
       })
       console.log('add:', input)
-      logger.info('add:', input, opts)
       return resultOk
     } else if (command === 'seed') {
       client.seed(input, {
@@ -892,11 +887,9 @@ function runDaemon () {
         torrentId: opts.torrentId
       }, torrent => {
         console.log(torrent.magnetURI)
-        logger.info(torrent.magnetURI)
         memUsage()
       })
       console.log('seed:', input)
-      logger.info('seed:', input, opts)
       return resultOk
     } else if (command === 'append') {
       let t = getTorrent(input)
@@ -905,15 +898,13 @@ function runDaemon () {
         if (wtc) {
           wtc.append(t.index, opts.pieceStart, opts.pieceEnd, opts.seedPath)
         }
-        logger.info('append:', input)
         return resultOk
       } else {
-        logger.info('append: Not found', input)
         return '{"status": "fail", "error": "Not found"}'
       }
     } else if (command === 'list') {
       let list = client.torrents
-      console.log('list:', list)
+      if (!input) console.log('list:', list)
 
       const torrentStatus = (t) => {
         let s = 'wait'
@@ -937,7 +928,6 @@ function runDaemon () {
             progress: t.progress,
             seedfiles: t.seedfiles
           })
-          logger.info('list:', input, rs)
         } else {
           return '{"error": "Not found"}'
         }
@@ -957,10 +947,8 @@ function runDaemon () {
       if (t) {
         let p = t.progress
         console.log('progress:', p)
-        logger.info('progress:', input, p)
         return JSON.stringify({progress: p})
       } else {
-        logger.info('progress: Not found', input)
         return '{"error": "Not found"}'
       }
     } else if (command === 'remove') {
@@ -971,14 +959,11 @@ function runDaemon () {
           wtc.remove(t.index, err => {
             if (err) {
               console.log('remove error', input, err)
-              logger.error('remove error', input, err)
             }
           }, { removeTorrent: opts.removeTorrent || false })
-          logger.info('remove:', input)
         }
         return resultOk
       } else {
-        logger.info('remove: Not found', input)
         return '{"status": "fail", "error": "Not found"}'
       }
     } else if (command === 'destroy') {
@@ -1011,18 +996,14 @@ function runDaemon () {
           const r = wtc.pause(t.index, err => {
             if (err) {
               console.log('pause error', input, err)
-              logger.error('pause error', input, err)
             }
           })
           if (r === false) {
-            logger.error('pause failed', input)
             return '{"status": "fail", "error": "Invalid params"}'
           } 
-          logger.info('pause:', input)
         }
         return resultOk
       } else {
-        logger.info('pause: Not found', input)
         return '{"status": "fail", "error": "Not found"}'
       }
     } else if (command === 'resume') {
@@ -1033,18 +1014,25 @@ function runDaemon () {
           const r = wtc.resume(t.index, err => {
             if (err) {
               console.log('resume error', input, err)
-              logger.error('resume error', input, err)
             }
           })
           if (r === false) {
-            logger.error('resume failed', input)
             return '{"status": "fail", "error": "Invalid params"}'
           } 
-          logger.info('resume:', input)
         }
         return resultOk
       } else {
-        logger.info('resume: Not found', input)
+        return '{"status": "fail", "error": "Not found"}'
+      }
+    } else if (command === 'peerstat') {
+      let t = getTorrent(input)
+      if (t) {
+        let wtc = client.getClient(t.client)
+        if (wtc) {
+          wtc.peerstat(t.index)
+        }
+        return resultOk
+      } else {
         return '{"status": "fail", "error": "Not found"}'
       }
     }

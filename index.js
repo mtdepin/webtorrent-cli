@@ -5,21 +5,12 @@ import Torrent from '../webtorrent/lib/torrent.js'
 import EventEmitter from 'events'
 import * as fs from 'fs'
 import { nanoid } from 'nanoid'
-import log4js from 'log4js'
+import prettierBytes from 'prettier-bytes'
 
 const debug = debugFactory('webtorrent-cli')
 
-log4js.configure({
-  appenders: {
-    WebTorrentCli: { type: 'file', filename: 'webtorrent.log' },
-  },
-  categories: {
-    default: { appenders: ['WebTorrentCli'], level: 'debug' },
-  },
-})
-const logger = log4js.getLogger()
-
 const TORRENT_TIMEOUT = 600000
+const TORRENT_TIMO_INTERVAL = 10000
 
 class WebTorrentId {
   constructor (id, torrent, opts = {}) {
@@ -40,6 +31,9 @@ class WebTorrentId {
     this.paused = false
     this.pausing = false
     this.timer = null
+    this.timeout = null
+    this.timestamp = null
+    this.downloaded = 0
   }
 
   destroy () {
@@ -70,7 +64,9 @@ export class WebTorrentCli extends EventEmitter {
       dhtPort: opts.dhtPort,
       downloadLimit: opts.downloadLimit,
       uploadLimit: opts.uploadLimit,
-      tracker: tracker
+      tracker: tracker,
+      dht: opts.disableDht === true ? false : true,
+      lsd: opts.disableLsd === true ? false : true
     })
     this._torrents = new Map()
     this._counter = 0
@@ -163,8 +159,11 @@ export class WebTorrentCli extends EventEmitter {
       }
       this._torrents.delete(index)
       if (cTid.timer) {
-        clearTimeout(cTid.timer)
+        clearInterval(cTid.timer)
         cTid.timer = null
+        cTid.timeout = null
+        cTid.timestamp = null
+        console.log('_onTorrentClose: destroy timer', cTid)
       }
       cTid.destroy()
     }
@@ -172,23 +171,54 @@ export class WebTorrentCli extends EventEmitter {
     this.store()
   }
 
+  _torrentPaused (torrentId) {
+    if (torrentId.paused) return
+    const torrent = torrentId._torrent
+    if (torrent) {
+      torrent.removeAllListeners('infoHash')
+      torrent.removeAllListeners('metadata')
+      torrent.removeAllListeners('done')
+      torrent.removeAllListeners('download')
+      torrent.removeAllListeners('close')
+      torrentId._torrent = null
+    }
+    if (torrentId.timer) {
+      clearInterval(torrentId.timer)
+      torrentId.timer = null
+      torrentId.timeout = null
+      torrentId.timestamp = null
+      console.log('_torrentPaused: destroy timer', torrentId)
+    }
+    this.store()
+  }
+
   _setTimeout (torrentId, torrent, timeout) {
     console.log('_setTimeout:', torrentId.info, timeout)
-    const f = () => {
-      torrentId.timer = setTimeout(() => {
+    if (torrentId.timer) {
+      console.log('_setTimeout: reset timer', torrentId.info, torrentId.timer)
+      clearInterval(torrentId.timer)
+      torrentId.timer = null
+    }
+    torrentId.timeout = timeout
+    torrentId.timestamp = Date.now()
+    torrentId.downloaded = torrent ? torrent.downloaded : 0
+    torrentId.timer = setInterval(() => {
+      const ts = Date.now()
+      if (ts - torrentId.timestamp >= torrentId.timeout) {
         this.pause(torrentId._id, err => {
           if (err) {
             console.log('torrent timeout: pause failed', torrentId.info, err)
           }
         })
-      }, timeout)
-    }
+      }
+    }, TORRENT_TIMO_INTERVAL)
 
-    f()
     if (!torrent) return
     torrent.on('download', (_bytes) => {
-      clearTimeout(torrentId.timer)
-      f()
+      if (torrent.downloaded > torrentId.downloaded) {
+        torrentId.downloaded = torrent.downloaded
+        torrentId.timestamp = Date.now()
+      }
     })
   }
 
@@ -540,14 +570,14 @@ export class WebTorrentCli extends EventEmitter {
           this._client.remove(t, null, err => {
             if (err) {
               console.log('pause error:', err)
+              torrentId.pausing = false
             } else {
+              this._torrentPaused(torrentId)
               torrentId.paused = true
-              torrentId._torrent = null
+              torrentId.pausing = false
               console.log('pause success.', torrentId)
-              this.store()
             }
             cb(err)
-            torrentId.pausing = false
           })
         } else {
           console.log('pause: torrent is null', torrentId)
@@ -556,6 +586,27 @@ export class WebTorrentCli extends EventEmitter {
       }
     }
     return false
+  }
+  
+  peerstat (index) {
+    if (typeof index !== 'number') return
+    const torrentId = this.getTorrentId(index)
+    if (!torrentId) return
+    const torrent = torrentId._torrent
+    if (!torrent) return
+    console.log(torrent.name, torrent.infoHash)
+    console.log('peers length', torrent._peersLength, ', peer connect', torrent.numPeers)
+    torrent.wires.forEach(wire => {
+      const args = [
+        (wire.remoteAddress
+          ? `${wire.remoteAddress}:${wire.remotePort}`
+          : 'Unknown').padEnd(25),
+        prettierBytes(wire.downloaded).padEnd(10),
+        (prettierBytes(wire.downloadSpeed()) + '/s').padEnd(12),
+        (prettierBytes(wire.uploadSpeed()) + '/s').padEnd(12)
+      ]
+      console.log(...args)
+    })
   }
 
   destroy (cb, opts = {}) {
@@ -775,7 +826,6 @@ export class WebTorrentCli extends EventEmitter {
         console.log('Resume torrents from file:', path)
       } catch (e) {
         console.log('Parse resume file error:', e.name, e.message)
-        logger.error('Parse resume file error:', e.name, e.message)
         resetPending()
       }
     } else {
@@ -928,7 +978,6 @@ export class MultiWebTorrentCli extends EventEmitter {
     this.clients.set(id, c)
     c.on('error', err => {
       console.log('Error:', err.message || err)
-      logger.error('Error:', err.message || err)
     })
 
     const onLoad = () => {
