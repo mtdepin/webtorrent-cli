@@ -531,7 +531,6 @@ export class WebTorrentCli extends EventEmitter {
         let t = torrentId._torrent
         let torrentPath = torrentId.path || torrentId.seedPath
         console.log('remove:', opts, torrentPath)
-        this._torrents.delete(torrent)
         if (t) {
           this._client.remove(t, null, cb)
         } else {
