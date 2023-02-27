@@ -78,7 +78,8 @@ const options = {
     'announce-auth': { desc: 'Tracker URL announce auth', type: 'string', requiresArg:true },
     'save-torrent': { desc: 'save torrent file', type: 'boolean' },
     'disable-dht': { desc: 'disable DHT', type: 'boolean' },
-    'disable-lsd': { desc: 'disable LSD', type: 'boolean' }
+    'disable-lsd': { desc: 'disable LSD', type: 'boolean' },
+    'profiler': { desc: 'enable profiler', type: 'boolean' }
   }
 }
 
@@ -177,8 +178,6 @@ yargs
 
 function init (_argv) {
   argv = _argv
-  console.log('TEST\n')
-  console.log(argv)
   if ((argv._.length === 0 && !argv.torrentIds) || argv._[0] === 'version') {
     return
   }
@@ -294,9 +293,7 @@ function runCreate (input) {
     argv.createdBy = 'WebTorrent <https://webtorrent.io>'
   }
 
-  console.log('runCreate', argv)
   createTorrent(input, argv, (err, torrent) => {
-    console.log('createTorrent', argv)
     if (err) {
       return errorAndExit(err)
     }
@@ -823,7 +820,33 @@ function runPieceSeed (input) {
   }
 }
 
+let counter = 0
+let prev = Date.now()
+let markt = prev
+
+function eventLoopLatency () {
+  setInterval(() => {
+    const ts = Date.now()
+    const latency = ts - prev
+    const lat2 = ts - markt
+    if (latency > 2000) {
+      console.log('Event loop latency:', latency)
+      counter = 0
+      markt = ts
+    } else {
+      counter += 1
+      if (lat2 > 10000) {
+        console.log('Avenge event loop latency:', lat2 / counter)
+        counter = 0
+        markt = ts
+      }
+    }
+    prev = ts
+  }, 0)
+}
+
 function runDaemon () {
+  if (argv.profiler) eventLoopLatency()
   const format = function (bytes) {
     return (bytes / 1024 / 1024).toFixed(2) + ' MB'
   }
@@ -884,7 +907,8 @@ function runDaemon () {
         pieceStart: opts.pieceStart,
         pieceEnd: opts.pieceEnd,
         pieceRange: pieceRange,
-        torrentId: opts.torrentId
+        torrentId: opts.torrentId,
+        timeout: opts.setTimeout
       }, torrent => {
         console.log(torrent.magnetURI)
         memUsage()
@@ -908,8 +932,8 @@ function runDaemon () {
 
       const torrentStatus = (t) => {
         let s = 'wait'
-        if (t.paused) {
-          s = 'paused'
+        if (t.status && (t.status !== 'running')) {
+          s = t.status
         } else if (t.seeding) {
           s = 'seeding'
         } else if (t.done || t.progress > 0.001) {
@@ -1081,12 +1105,53 @@ function runDaemon () {
     })
   }
 
+  const httpServer = http.createServer((req, res) => {
+    let data = ''
+    req.on('data', chunk => {
+      data += chunk
+    })
+    req.on('end', () => {
+      console.log('http recv:', data)
+      const requstParser = Yargs()
+      let opts = requstParser.parse(data.toString())
+      console.log(opts)
+      let result = '{"status": "fail", "error": "invalid command"}'
+      if (opts._.length > 1) {
+        result = onCommand(opts._[0], opts._[1], opts)
+      } else if (opts._.length > 0) {
+        result = onCommand(opts._[0], null, opts)
+      }
+      console.log('command done:', data)
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      res.write(result)
+      res.end()
+      console.log('http end:', data)
+    })
+  })
+  httpServer.on('error', err => {
+    fatalError(err)
+  })
+  const httpSock = '/var/run/webtorrent_http.sock'
+  try {
+    fs.unlinkSync(httpSock)
+  } catch (error) {
+    console.log('unlink error:', error.name, error.message)
+  }
+
+  const startHttpServer = () => {
+    httpServer.listen(httpSock, () => {
+      console.log('http server started.')
+    })
+  }
+
   if (client._loadCount === 0) {
     startServer()
+    startHttpServer()
   } else {
     client.once('loaded', () => {
       console.log('client complete load.')
       startServer()
+      startHttpServer()
     })
   }
 }
